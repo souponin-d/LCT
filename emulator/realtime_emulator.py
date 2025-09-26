@@ -1,12 +1,13 @@
 """Utility for emulating real-time data streaming from archived recordings.
 
-The emulator reads historical samples from JSON/JSONL/CSV files and emits batches of
-measurements with a configurable cadence.  This allows the rest of the system to be
-developed against deterministic data before integrating with the actual hardware.
+The emulator replays historical measurements stored in CSV files located inside the
+numbered folders of the ``data`` directory.  Each folder contains two sub-directories:
+``bpm`` and ``uterus``.  Files inside these folders share the same prefix and differ only
+by the ``_1`` / ``_2`` suffix that indicates the source sensor.  The emulator loads
+paired files and produces combined samples that contain both signals.
 """
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import time
@@ -20,12 +21,9 @@ from typing import Any, Generator, Iterable, Iterator
 class RealTimeConfig:
     """Runtime configuration for the real-time emulator."""
 
-    archive_path: Path
+    dataset_path: Path
     time_step_ms: int
     batch_size: int
-    loop_forever: bool = False
-    output_path: Path = Path("batch.json")
-    max_batches: int | None = None
 
 
 class RealTimeEmulator:
@@ -33,75 +31,78 @@ class RealTimeEmulator:
 
     def __init__(self, config: RealTimeConfig) -> None:
         self.config = config
-        self._records = tuple(self._load_records(config.archive_path))
+        self._records = tuple(self._load_records(config.dataset_path))
         if not self._records:
             raise ValueError(
-                "Archive appears to be empty – populate `data/archive` with JSON/CSV files first."
+                "Dataset appears to be empty – ensure the numbered folder contains paired CSV files."
             )
         self._cursor = 0
 
     # ------------------------------------------------------------------
     # Data loading helpers
-    def _load_records(self, path: Path) -> Iterator[dict[str, Any]]:
-        """Load archive content from a file or a directory.
+    def _load_records(self, folder: Path) -> Iterator[dict[str, Any]]:
+        """Load paired BPM and uterus measurements from the provided folder."""
 
-        Supports JSON arrays, JSON Lines files (`*.jsonl`), and CSV files.
-        """
+        bpm_folder = folder / "bpm"
+        uterus_folder = folder / "uterus"
 
-        if path.is_dir():
-            for file_path in sorted(path.iterdir()):
-                if file_path.suffix.lower() in {".json", ".jsonl", ".csv"}:
-                    yield from self._load_records(file_path)
-            return
+        if not bpm_folder.is_dir() or not uterus_folder.is_dir():
+            raise ValueError(
+                "Dataset folder must contain `bpm` and `uterus` subdirectories with CSV files."
+            )
 
-        suffix = path.suffix.lower()
-        if suffix == ".jsonl":
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
+        prefixes = sorted({self._extract_prefix(path.name) for path in bpm_folder.glob("*.csv")})
+        for prefix in prefixes:
+            bpm_path = bpm_folder / f"{prefix}_1.csv"
+            uterus_path = uterus_folder / f"{prefix}_2.csv"
+            if not bpm_path.exists() or not uterus_path.exists():
+                continue
+            yield from self._merge_pair(bpm_path, uterus_path)
+
+    def _extract_prefix(self, filename: str) -> str:
+        stem = Path(filename).stem
+        if "_" not in stem:
+            return stem
+        return stem.rsplit("_", 1)[0]
+
+    def _read_signal_csv(self, file_path: Path) -> Iterator[tuple[int, float]]:
+        with file_path.open("r", encoding="utf-8", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            if "time_sec" not in reader.fieldnames or "value" not in reader.fieldnames:
+                raise ValueError(f"Unexpected CSV format in {file_path}")
+            for row in reader:
+                try:
+                    timestamp_ms = int(round(float(row["time_sec"]) * 1000))
+                    value = float(row["value"])
+                except (TypeError, ValueError):
                     continue
-                yield json.loads(line)
-        elif suffix == ".json":
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and "records" in payload:
-                payload = payload["records"]
-            if not isinstance(payload, list):
-                raise ValueError(f"JSON archive {path} must contain a list of records")
-            for record in payload:
-                if not isinstance(record, dict):
-                    raise ValueError(f"JSON record in {path} is not an object: {record!r}")
-                yield record
-        elif suffix == ".csv":
-            with path.open("r", encoding="utf-8", newline="") as csv_file:
-                reader = csv.DictReader(csv_file)
-                for row in reader:
-                    yield self._normalise_csv_row(row)
-        else:
-            raise ValueError(f"Unsupported archive format: {path.suffix}")
+                yield timestamp_ms, value
 
-    def _normalise_csv_row(self, row: dict[str, str]) -> dict[str, Any]:
-        """Convert CSV rows into the standard record structure."""
-
-        timestamp = int(float(row.get("timestamp", "0")))
-        # Everything except the timestamp is treated as a signal
-        signals: dict[str, float] = {}
-        for key, value in row.items():
-            if key == "timestamp":
-                continue
-            try:
-                signals[key] = float(value)
-            except (TypeError, ValueError):
-                continue
-        return {"timestamp": timestamp, "signals": signals}
+    def _merge_pair(self, bpm_path: Path, uterus_path: Path) -> Iterator[dict[str, Any]]:
+        bpm_stream = list(self._read_signal_csv(bpm_path))
+        uterus_stream = list(self._read_signal_csv(uterus_path))
+        dataset_kind = bpm_path.parents[2].name if len(bpm_path.parents) >= 3 else "unknown"
+        folder_id = bpm_path.parents[1].name if len(bpm_path.parents) >= 2 else ""
+        record_id = bpm_path.stem.rsplit("_", 1)[0]
+        for (timestamp_ms, bpm_value), (_, uterus_value) in zip(bpm_stream, uterus_stream):
+            yield {
+                "timestamp": timestamp_ms,
+                "signals": {
+                    "bpm": bpm_value,
+                    "uterus": uterus_value,
+                },
+                "metadata": {
+                    "dataset": dataset_kind,
+                    "folder": folder_id,
+                    "record": record_id,
+                },
+            }
 
     # ------------------------------------------------------------------
     # Streaming helpers
     def _next_chunk(self) -> list[dict[str, Any]]:
         if self._cursor >= len(self._records):
-            if self.config.loop_forever:
-                self._cursor = 0
-            else:
-                return []
+            return []
         end = min(self._cursor + self.config.batch_size, len(self._records))
         chunk = list(self._records[self._cursor:end])
         self._cursor = end
@@ -145,55 +146,34 @@ class RealTimeEmulator:
     def stream_batches(self) -> Generator[dict[str, Any], None, None]:
         """Yield formatted batches according to the configured cadence."""
 
-        emitted = 0
         while True:
-            if self.config.max_batches is not None and emitted >= self.config.max_batches:
-                return
-
             chunk = self._next_chunk()
             if not chunk:
                 return
 
             batch = self._format_batch(chunk)
-            emitted += 1
             yield batch
-            time.sleep(self.config.time_step_ms / 1000)
+            if self._cursor < len(self._records):
+                time.sleep(self.config.time_step_ms / 1000)
 
     # ------------------------------------------------------------------
     def run(self) -> None:
-        """Continuously write batches to ``config.output_path`` in JSON format."""
+        """Print batches as JSON objects."""
 
         for batch in self.stream_batches():
-            self.config.output_path.write_text(json.dumps(batch, indent=2), encoding="utf-8")
+            print(json.dumps(batch, indent=2, ensure_ascii=False), flush=True)
 
 
-def parse_args() -> RealTimeConfig:
-    parser = argparse.ArgumentParser(description="Real-time archive playback emulator")
-    parser.add_argument("archive", type=Path, help="Path to the archive file or directory")
-    parser.add_argument("--time-step", type=int, default=1000, help="Cadence between batches in milliseconds")
-    parser.add_argument("--batch-size", type=int, default=10, help="Number of samples per batch")
-    parser.add_argument(
-        "--loop", action="store_true", help="Restart from the beginning when the archive is exhausted"
-    )
-    parser.add_argument(
-        "--max-batches", type=int, default=None, help="Optionally cap the number of batches produced"
-    )
-    parser.add_argument(
-        "--output", type=Path, default=Path("batch.json"), help="Destination file for the generated batch"
-    )
-    args = parser.parse_args()
-    return RealTimeConfig(
-        archive_path=args.archive,
-        time_step_ms=args.time_step,
-        batch_size=args.batch_size,
-        loop_forever=args.loop,
-        max_batches=args.max_batches,
-        output_path=args.output,
-    )
+# Local configuration -------------------------------------------------------
+# The dataset path must point to one of the numbered folders inside either the
+# ``data/hypoxia`` or ``data/regular`` directories, for example ``data/hypoxia/1``.
+DATASET_PATH = Path("data/hypoxia/1")
+TIME_STEP_MS = 1000
+BATCH_SIZE = 10
 
 
 def main() -> None:
-    config = parse_args()
+    config = RealTimeConfig(dataset_path=DATASET_PATH, time_step_ms=TIME_STEP_MS, batch_size=BATCH_SIZE)
     emulator = RealTimeEmulator(config)
     emulator.run()
 
