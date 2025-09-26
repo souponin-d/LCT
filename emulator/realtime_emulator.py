@@ -13,6 +13,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Iterable, Iterator
 
@@ -55,6 +56,14 @@ class RealTimeEmulator:
                 "Архив пуст – заполните `data/archive` CSV-файлами перед запуском."
             )
         self._cursor = 0
+        self._batch_counter = 0
+        self._known_signals = sorted(
+            {
+                name
+                for record in self._records
+                for name in record.get("signals", {}).keys()
+            }
+        )
 
     # ------------------------------------------------------------------
     # Парсинг CSV
@@ -178,38 +187,35 @@ class RealTimeEmulator:
         return chunk
 
     def _format_batch(self, chunk: Iterable[dict[str, Any]]) -> dict[str, Any]:
-        timestamps: list[int] = []
-        signals: dict[str, list[float]] = defaultdict(list)
-        artifacts: list[list[float]] = []
-        predictions: dict[str, list[Any]] = defaultdict(list)
-        metadata: dict[str, Any] = {}
+        chunk_list = chunk if isinstance(chunk, list) else list(chunk)
+        self._batch_counter += 1
+        batch_id = f"b-{self._batch_counter:03d}"
+        sent_at = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
 
-        for record in chunk:
-            timestamp = record.get("timestamp")
-            if timestamp is not None:
-                timestamps.append(int(timestamp))
-
+        items: dict[str, list[float]] = defaultdict(list)
+        for record in chunk_list:
             for signal_name, value in record.get("signals", {}).items():
                 try:
-                    signals[signal_name].append(float(value))
+                    items[signal_name].append(float(value))
                 except (TypeError, ValueError):
                     continue
 
-            for coords in record.get("artifacts", []) or []:
-                if isinstance(coords, (list, tuple)) and len(coords) == 2:
-                    artifacts.append([float(coords[0]), float(coords[1])])
-
-            for key, value in (record.get("predictions") or {}).items():
-                predictions[key].append(value)
-
-            metadata.update(record.get("metadata") or {})
+        all_signals = sorted(set(items.keys()) | set(self._known_signals))
+        normalised_items = {
+            signal_name: list(items.get(signal_name, [])) for signal_name in all_signals
+        }
 
         return {
-            "timestamps": timestamps,
-            "signals": signals,
-            "artifacts": artifacts,
-            "predictions": predictions,
-            "metadata": metadata or None,
+            "batch_id": batch_id,
+            "sent_at": sent_at,
+            "batch_size": len(chunk_list),
+            "time_step": self.config.time_step_ms,
+            "items": normalised_items,
         }
 
     def stream_batches(self) -> Generator[dict[str, Any], None, None]:

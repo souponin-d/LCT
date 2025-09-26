@@ -10,6 +10,7 @@ At this stage the backend exposes minimal endpoints that will be expanded later:
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime
 from typing import Deque, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -17,27 +18,27 @@ from pydantic import BaseModel
 
 
 class BatchPayload(BaseModel):
-    """Represents the structure of the batches emitted by the emulator.
+    """Represents a single real-time batch forwarded by the emulator.
 
     Attributes
     ----------
-    timestamps:
-        Millisecond timestamps associated with the sampled values.
-    signals:
-        Dictionary mapping signal names to lists of numeric samples.
-    artifacts:
-        List of [x1, x2] coordinate pairs that highlight detected artefacts.
-    predictions:
-        Arbitrary payload with model predictions (values will be defined later).
-    metadata:
-        Additional metadata (optional) to help debug or visualise the batch.
+    batch_id:
+        Sequential identifier allowing the frontend to detect gaps.
+    sent_at:
+        UTC timestamp indicating when the batch was produced.
+    batch_size:
+        Number of samples included in the batch.
+    time_step:
+        Delay between batches, expressed in milliseconds.
+    items:
+        Mapping of signal names (``bpm``, ``uterus``) to their collected samples.
     """
 
-    timestamps: list[int]
-    signals: dict[str, list[float]]
-    artifacts: list[tuple[float, float]]
-    predictions: dict[str, list[float] | float | int | str | None]
-    metadata: dict[str, str | int | float | None] | None = None
+    batch_id: str
+    sent_at: datetime
+    batch_size: int
+    time_step: int
+    items: dict[str, list[float]]
 
 
 app = FastAPI(title="LCT Real-Time Proxy", version="0.1.0")
