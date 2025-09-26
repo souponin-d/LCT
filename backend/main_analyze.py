@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, Response
 
 
 FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
@@ -17,7 +17,18 @@ FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 app = FastAPI(title="LCT Analysis Stub", version="0.1.0")
 
 if FRONTEND_DIST.exists():
-    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_frontend_index() -> Response:
+        """Возвратить собранный ``index.html`` фронтенда."""
+
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+    @app.get("/App.svelte", include_in_schema=False)
+    async def serve_frontend_app() -> Response:
+        """Отдать сырой ``App.svelte`` компонент для runtime-компиляции."""
+
+        return FileResponse(FRONTEND_DIST / "App.svelte")
 
 
 _frontend_clients: Set[WebSocket] = set()
