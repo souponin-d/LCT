@@ -6,6 +6,7 @@ import asyncio
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
+from sys import version_info
 from typing import Optional
 
 import uvicorn
@@ -14,7 +15,13 @@ from backend.main_analyze import app
 from emulator.realtime_emulator import ARCHIVE_DIRECTORY, RealTimeConfig, RealTimeEmulator
 
 
-@dataclass(slots=True)
+# ``slots`` parameter is available only starting from Python 3.10.
+# Older Python versions used in some environments would raise an error if the
+# argument is passed, so we include it conditionally.
+_dataclass_kwargs = {"slots": True} if version_info >= (3, 10) else {}
+
+
+@dataclass(**_dataclass_kwargs)
 class PipelineSettings:
     """Настройки запуска связки эмулятора и бэкенда."""
 
