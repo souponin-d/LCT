@@ -3,15 +3,38 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict
-
 from contextlib import suppress
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
+
+FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
 app = FastAPI(title="LCT Analysis Stub", version="0.1.0")
+
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+
+
+_frontend_clients: Set[WebSocket] = set()
+
+
+async def _broadcast_to_frontend(payload: Dict[str, Any]) -> None:
+    """Отправить ``processed``-сообщение всем подключённым фронтам."""
+
+    disconnected: list[WebSocket] = []
+    for client in list(_frontend_clients):
+        try:
+            await client.send_json(payload)
+        except Exception:  # pragma: no cover - best-effort рассылка
+            disconnected.append(client)
+
+    for client in disconnected:
+        _frontend_clients.discard(client)
 
 
 def _iso_now() -> str:
@@ -69,8 +92,26 @@ async def analyze_websocket(websocket: WebSocket) -> None:
 
             processed = _build_processed_payload(batch, started_at)
             await websocket.send_json(processed)
-            print(json.dumps(processed, ensure_ascii=False, indent=2))
+            await _broadcast_to_frontend(processed)
     finally:
+        with suppress(RuntimeError):
+            await websocket.close()
+
+
+@app.websocket("/ws/processed")
+async def processed_stream(websocket: WebSocket) -> None:
+    """Стрим обработанных данных для фронтенда по WebSocket."""
+
+    await websocket.accept()
+    _frontend_clients.add(websocket)
+    try:
+        while True:
+            try:
+                await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+    finally:
+        _frontend_clients.discard(websocket)
         with suppress(RuntimeError):
             await websocket.close()
 

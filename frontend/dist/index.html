@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LCT Processed Data</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      const target = document.getElementById('app');
+
+      async function bootstrap() {
+        try {
+          const [compilerModule, response] = await Promise.all([
+            import('https://cdn.jsdelivr.net/npm/svelte@4/compiler.mjs'),
+            fetch('./App.svelte')
+          ]);
+
+          if (!response.ok) {
+            throw new Error('Не удалось загрузить исходники компонента');
+          }
+
+          const source = await response.text();
+          const { compile } = compilerModule;
+          const { js, css } = compile(source, {
+            generate: 'dom',
+            format: 'esm',
+            sveltePath: 'https://cdn.jsdelivr.net/npm/svelte@4'
+          });
+
+          if (css && css.code) {
+            const style = document.createElement('style');
+            style.textContent = css.code;
+            document.head.appendChild(style);
+          }
+
+          const blob = new Blob([js.code], { type: 'application/javascript' });
+          const url = URL.createObjectURL(blob);
+          try {
+            const module = await import(url);
+            new module.default({ target });
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        } catch (error) {
+          target.innerHTML = `<pre style="color: #dc2626;">Ошибка запуска Svelte: ${error.message}</pre>`;
+        }
+      }
+
+      bootstrap();
+    </script>
+  </body>
+</html>
