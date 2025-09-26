@@ -1,27 +1,28 @@
-"""Utility for emulating real-time data streaming from archived recordings.
+"""Утилита для эмуляции потоковой передачи данных в реальном времени из архива.
 
-The emulator replays historical samples stored in CSV archives and emits batches of
-measurements with a configurable cadence.  This allows the rest of the system to be
-developed against deterministic data before integrating with the actual hardware.
+Эмулятор воспроизводит исторические измерения, сохранённые в CSV, и формирует батчи
+с заданной периодичностью. Это позволяет разрабатывать остальные части системы на
+детерминированных данных до интеграции с реальным оборудованием.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
+import sys
 import time
 from collections import defaultdict
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator, Iterable, Iterator
 
 
-# ``dataclass`` gained the ``slots`` parameter only in Python 3.10.
-# Older interpreters (e.g. Python 3.9 used on some developer machines) raise a
-# ``TypeError`` when the argument is provided.  The wrapper below keeps slot
-# generation enabled where possible, while remaining compatible with Python 3.9.
+# ``dataclass`` получила параметр ``slots`` только в Python 3.10.
+# Более старые интерпретаторы (например, Python 3.9) выбрасывают ``TypeError`` при
+# передаче аргумента, поэтому враппер ниже включает слоты там, где это возможно, и
+# остаётся совместимым с Python 3.9.
 def dataclass_with_optional_slots(_cls=None, /, *, slots: bool = True, **kwargs):
-    """Return a ``dataclass`` decorator that sets ``slots`` when supported."""
+    """Вернуть декоратор ``dataclass``, устанавливающий ``slots`` при поддержке."""
 
     if sys.version_info >= (3, 10) and slots:
         kwargs["slots"] = True
@@ -36,7 +37,7 @@ def dataclass_with_optional_slots(_cls=None, /, *, slots: bool = True, **kwargs)
 
 @dataclass_with_optional_slots
 class RealTimeConfig:
-    """Runtime configuration for the real-time emulator."""
+    """Параметры запуска эмулятора реального времени."""
 
     archive_path: Path
     time_step_ms: int
@@ -44,25 +45,25 @@ class RealTimeConfig:
 
 
 class RealTimeEmulator:
-    """Replay archived sensor readings as if they were arriving in real time."""
+    """Воспроизводить архивные данные так, будто они поступают онлайн."""
 
     def __init__(self, config: RealTimeConfig) -> None:
         self.config = config
         self._records = tuple(self._load_records(config.archive_path))
         if not self._records:
             raise ValueError(
-                "Archive appears to be empty – populate `data/archive` with JSON/CSV files first."
+                "Архив пуст – заполните `data/archive` CSV-файлами перед запуском."
             )
         self._cursor = 0
 
     # ------------------------------------------------------------------
-    # Data loading helpers
+    # Парсинг CSV
     def _load_records(self, path: Path) -> Iterator[dict[str, Any]]:
-        """Load archive content from a directory with ``bpm`` and ``uterus`` CSV files."""
+        """Загрузить архив из каталогов ``bpm`` и ``uterus`` с CSV-файлами."""
 
         if not path.is_dir():
             raise ValueError(
-                "Archive path must point to a directory containing 'bpm' and 'uterus' subdirectories"
+                "Путь архива должен указывать на каталог с подпапками 'bpm' и 'uterus'"
             )
 
         bpm_dir = path / "bpm"
@@ -70,7 +71,7 @@ class RealTimeEmulator:
 
         if not bpm_dir.is_dir() or not uterus_dir.is_dir():
             raise ValueError(
-                "Archive directory must include both 'bpm' and 'uterus' subdirectories with CSV files"
+                "Каталог архива обязан содержать подпапки 'bpm' и 'uterus' с CSV-файлами"
             )
 
         bpm_files = {
@@ -83,7 +84,7 @@ class RealTimeEmulator:
         common_stems = sorted(bpm_files.keys() & uterus_files.keys())
         if not common_stems:
             raise ValueError(
-                "No matching CSV file pairs were found in the 'bpm' and 'uterus' directories"
+                "Не найдено совпадающих пар CSV-файлов в папках 'bpm' и 'uterus'"
             )
 
         for stem in common_stems:
@@ -92,14 +93,14 @@ class RealTimeEmulator:
             yield from self._load_csv_pair(bpm_file, uterus_file)
 
     def _strip_suffix(self, filename: str) -> str:
-        """Remove the trailing channel suffix from a CSV filename."""
+        """Удалить суффикс канала из имени CSV-файла."""
 
         if "_" not in filename:
             return filename
         return filename.rsplit("_", 1)[0]
 
     def _load_csv_pair(self, bpm_path: Path, uterus_path: Path) -> Iterator[dict[str, Any]]:
-        """Combine paired BPM and uterus CSV files into unified records."""
+        """Объединить пары CSV-файлов BPM и uterus в единые записи."""
 
         bpm_rows = self._read_csv(bpm_path)
         uterus_rows = self._read_csv(uterus_path)
@@ -110,7 +111,7 @@ class RealTimeEmulator:
         common_times = sorted(bpm_series.keys() & uterus_series.keys())
         if not common_times:
             raise ValueError(
-                f"No overlapping timestamps between {bpm_path.name} and {uterus_path.name}"
+                f"Отсутствует пересечение временных меток между {bpm_path.name} и {uterus_path.name}"
             )
 
         for time_sec in common_times:
@@ -133,12 +134,12 @@ class RealTimeEmulator:
             try:
                 time_sec = float(row.get("time_sec", ""))
             except (TypeError, ValueError) as exc:
-                raise ValueError(f"Invalid time value in {filename}: {row!r}") from exc
+                raise ValueError(f"Недопустимое значение времени в {filename}: {row!r}") from exc
 
             try:
                 value = float(row.get("value", "nan"))
             except (TypeError, ValueError) as exc:
-                raise ValueError(f"Invalid numeric value in {filename}: {row!r}") from exc
+                raise ValueError(f"Недопустимое числовое значение в {filename}: {row!r}") from exc
 
             series[time_sec] = value
 
@@ -156,7 +157,7 @@ class RealTimeEmulator:
             timestamp = int(float(time_sec) * 1000)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"Invalid timestamp derived from {bpm_name} and {uterus_name}: {time_sec!r}"
+                f"Недопустимая метка времени из {bpm_name} и {uterus_name}: {time_sec!r}"
             ) from exc
 
         return {
@@ -168,13 +169,12 @@ class RealTimeEmulator:
         }
 
     # ------------------------------------------------------------------
-    # Streaming helpers
+    # Формирование батча
     def _next_chunk(self) -> list[dict[str, Any]]:
-        if self._cursor >= len(self._records):
-            return []
-        end = min(self._cursor + self.config.batch_size, len(self._records))
-        chunk = list(self._records[self._cursor:end])
-        self._cursor = end
+        chunk: list[dict[str, Any]] = []
+        for _ in range(self.config.batch_size):
+            chunk.append(self._records[self._cursor])
+            self._cursor = (self._cursor + 1) % len(self._records)
         return chunk
 
     def _format_batch(self, chunk: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -213,13 +213,10 @@ class RealTimeEmulator:
         }
 
     def stream_batches(self) -> Generator[dict[str, Any], None, None]:
-        """Yield formatted batches according to the configured cadence."""
+        """Выдавать сформированные батчи с заданной периодичностью."""
 
         while True:
             chunk = self._next_chunk()
-            if not chunk:
-                return
-
             batch = self._format_batch(chunk)
             yield batch
             if self.config.time_step_ms > 0:
@@ -227,24 +224,45 @@ class RealTimeEmulator:
 
     # ------------------------------------------------------------------
     def run(self) -> None:
-        """Continuously print batches in JSON format."""
+        """Непрерывно выводить батчи в формате JSON."""
 
         for batch in self.stream_batches():
             print(json.dumps(batch, indent=2, ensure_ascii=False))
 
+# ----------------------------------------------------------------------
+# Конфигурация
 ARCHIVE_DIRECTORY = Path(__file__).resolve().parents[1] / "data" / "hypoxia" / "1"
-# Adjust ``ARCHIVE_DIRECTORY`` to point at a numbered case folder (e.g. ``regular/3``).
-TIME_STEP_MS = 0  # milliseconds between emitted batches
-BATCH_SIZE = 120
 
 
-def main() -> None:
-    """Run the emulator using the configured archive and playback parameters."""
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Разобрать аргументы командной строки для настройки эмулятора."""
 
+    parser = argparse.ArgumentParser(description="Эмулятор потоковой передачи данных")
+    parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        required=True,
+        help="Количество точек в батче",
+    )
+    parser.add_argument(
+        "-t",
+        "--time-step",
+        type=int,
+        required=True,
+        help="Периодичность отправки батчей в миллисекундах",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Запустить эмулятор с параметрами из командной строки."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
     config = RealTimeConfig(
         archive_path=ARCHIVE_DIRECTORY,
-        time_step_ms=TIME_STEP_MS,
-        batch_size=BATCH_SIZE,
+        time_step_ms=args.time_step,
+        batch_size=args.batch_size,
     )
     emulator = RealTimeEmulator(config)
     emulator.run()
