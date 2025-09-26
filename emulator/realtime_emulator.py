@@ -7,15 +7,23 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import json
+import logging
 import sys
-import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Generator, Iterable, Iterator
+from typing import Any, AsyncGenerator, Generator, Iterable, Iterator
+
+import websockets
+from websockets.client import WebSocketClientProtocol
+
+
+LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
 
 
 # ``dataclass`` получила параметр ``slots`` только в Python 3.10.
@@ -225,15 +233,49 @@ class RealTimeEmulator:
             chunk = self._next_chunk()
             batch = self._format_batch(chunk)
             yield batch
+
+    async def iter_batches_async(self) -> AsyncGenerator[dict[str, Any], None]:
+        """Асинхронно выдавать батчи, выдерживая интервал между ними."""
+
+        while True:
+            yield self._format_batch(self._next_chunk())
             if self.config.time_step_ms > 0:
-                time.sleep(self.config.time_step_ms / 1000)
+                await asyncio.sleep(self.config.time_step_ms / 1000)
+
+    async def _pump_batches(self, websocket: WebSocketClientProtocol) -> None:
+        """Отправлять батчи на открытое WebSocket-соединение."""
+
+        async for batch in self.iter_batches_async():
+            await websocket.send(json.dumps(batch, ensure_ascii=False))
+            try:
+                await websocket.recv()
+            except websockets.ConnectionClosedOK:
+                break
+
+    async def stream_to_backend(self, websocket_url: str) -> None:
+        """Подключиться к анализатору и непрерывно слать батчи."""
+
+        while True:
+            try:
+                async with websockets.connect(websocket_url, max_size=None) as websocket:
+                    await self._pump_batches(websocket)
+            except (OSError, websockets.InvalidURI) as exc:
+                LOGGER.warning("Не удалось подключиться к %s: %s", websocket_url, exc)
+                await asyncio.sleep(1)
+            except websockets.ConnectionClosed as exc:
+                LOGGER.warning("Соединение закрыто (%s), переподключение", exc)
+                await asyncio.sleep(1)
 
     # ------------------------------------------------------------------
-    def run(self) -> None:
-        """Непрерывно выводить батчи в формате JSON."""
+    async def run_async(self, websocket_url: str) -> None:
+        """Асинхронно отправлять батчи на указанный WebSocket-эндпоинт."""
 
-        for batch in self.stream_batches():
-            print(json.dumps(batch, indent=2, ensure_ascii=False))
+        await self.stream_to_backend(websocket_url)
+
+    def run(self, websocket_url: str) -> None:
+        """Синхронный враппер для совместимости со старыми вызовами."""
+
+        asyncio.run(self.run_async(websocket_url))
 
 # ----------------------------------------------------------------------
 # Конфигурация
@@ -258,6 +300,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         required=True,
         help="Периодичность отправки батчей в миллисекундах",
     )
+    parser.add_argument(
+        "--endpoint",
+        type=str,
+        default="ws://127.0.0.1:8080/ws/analyze",
+        help="Адрес WebSocket-эндпоинта анализатора",
+    )
     return parser.parse_args(argv)
 
 
@@ -271,7 +319,7 @@ def main(argv: list[str] | None = None) -> None:
         batch_size=args.batch_size,
     )
     emulator = RealTimeEmulator(config)
-    emulator.run()
+    emulator.run(args.endpoint)
 
 
 if __name__ == "__main__":
