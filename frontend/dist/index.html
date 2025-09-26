@@ -4,51 +4,268 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>LCT Processed Data</title>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script type="module">
-      const target = document.getElementById('app');
-
-      async function bootstrap() {
-        try {
-          const [compilerModule, response] = await Promise.all([
-            import('https://cdn.jsdelivr.net/npm/svelte@4/compiler.mjs'),
-            fetch('./App.svelte')
-          ]);
-
-          if (!response.ok) {
-            throw new Error('Не удалось загрузить исходники компонента');
-          }
-
-          const source = await response.text();
-          const { compile } = compilerModule;
-          const { js, css } = compile(source, {
-            generate: 'dom',
-            format: 'esm',
-            sveltePath: 'https://cdn.jsdelivr.net/npm/svelte@4'
-          });
-
-          if (css && css.code) {
-            const style = document.createElement('style');
-            style.textContent = css.code;
-            document.head.appendChild(style);
-          }
-
-          const blob = new Blob([js.code], { type: 'application/javascript' });
-          const url = URL.createObjectURL(blob);
-          try {
-            const module = await import(url);
-            new module.default({ target });
-          } finally {
-            URL.revokeObjectURL(url);
-          }
-        } catch (error) {
-          target.innerHTML = `<pre style="color: #dc2626;">Ошибка запуска Svelte: ${error.message}</pre>`;
-        }
+    <style>
+      :root {
+        font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        line-height: 1.5;
+        font-weight: 400;
+        color: #0f172a;
+        background-color: #f8fafc;
       }
 
-      bootstrap();
+      body {
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      button {
+        cursor: pointer;
+        border: none;
+        border-radius: 0.5rem;
+        padding: 0.5rem 1rem;
+        font-size: 1rem;
+        font-weight: 600;
+        background-color: #2563eb;
+        color: #ffffff;
+        transition: background-color 0.2s ease;
+      }
+
+      button:hover {
+        background-color: #1d4ed8;
+      }
+
+      .card {
+        background: #ffffff;
+        border-radius: 0.75rem;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.1);
+        padding: 1.5rem;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.95rem;
+        font-weight: 500;
+        margin-bottom: 1rem;
+      }
+
+      .status-dot {
+        width: 0.75rem;
+        height: 0.75rem;
+        border-radius: 9999px;
+        background: #9ca3af;
+      }
+
+      .status-dot.connected {
+        background: #16a34a;
+      }
+
+      .status-dot.connecting {
+        background: #facc15;
+      }
+
+      .status-dot.disconnected {
+        background: #dc2626;
+      }
+
+      pre {
+        margin: 0;
+        overflow-x: auto;
+        background: #0f172a;
+        color: #f8fafc;
+        padding: 1rem;
+        border-radius: 0.75rem;
+      }
+
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 3rem 1.5rem;
+      }
+
+      h1 {
+        margin-top: 0;
+        font-size: 2rem;
+        margin-bottom: 1rem;
+      }
+
+      .controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+      }
+
+      .small-text {
+        font-size: 0.85rem;
+        color: #475569;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="card">
+        <h1>Processed Data Monitor</h1>
+        <div class="controls">
+          <div class="status">
+            <span class="status-dot connecting" data-status-dot></span>
+            <span data-status-text>Устанавливаем соединение…</span>
+          </div>
+          <button type="button" data-test-button>Test</button>
+        </div>
+        <p class="small-text" data-last-updated>Ожидание данных от бэкенда…</p>
+        <p class="small-text">
+          Количество нажатий на кнопку Test: <span data-test-count>0</span>
+        </p>
+        <pre data-payload>{
+  "status": "ожидаем processed_data.json"
+}</pre>
+      </div>
+    </main>
+    <script>
+      (function () {
+        const reconnectDelay = 1500;
+        const statusMessages = {
+          connected: 'Соединение установлено',
+          connecting: 'Устанавливаем соединение…',
+          disconnected: 'Соединение отсутствует'
+        };
+
+        const statusDot = document.querySelector('[data-status-dot]');
+        const statusText = document.querySelector('[data-status-text]');
+        const lastUpdated = document.querySelector('[data-last-updated]');
+        const testCount = document.querySelector('[data-test-count]');
+        const payload = document.querySelector('[data-payload]');
+        const testButton = document.querySelector('[data-test-button]');
+
+        let clicks = 0;
+        let socket = null;
+        let shouldReconnect = true;
+        let reconnectTimer = null;
+
+        function updateStatus(status) {
+          const knownStatuses = ['connected', 'connecting', 'disconnected'];
+          statusDot.classList.remove(...knownStatuses);
+          if (knownStatuses.includes(status)) {
+            statusDot.classList.add(status);
+          }
+          statusText.textContent = statusMessages[status] || 'Неизвестный статус';
+        }
+
+        function setLastUpdated(date) {
+          if (date) {
+            lastUpdated.textContent = `Последнее обновление: ${date.toLocaleTimeString()}`;
+          } else {
+            lastUpdated.textContent = 'Ожидание данных от бэкенда…';
+          }
+        }
+
+        function renderPayload(data) {
+          try {
+            payload.textContent = JSON.stringify(data, null, 2);
+          } catch (error) {
+            payload.textContent = '{\n  "error": "Не удалось сериализовать данные"\n}';
+          }
+        }
+
+        function clearReconnectTimer() {
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+        }
+
+        function scheduleReconnect() {
+          if (!shouldReconnect || reconnectTimer) {
+            return;
+          }
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            if (shouldReconnect) {
+              connect();
+            }
+          }, reconnectDelay);
+        }
+
+        function connect() {
+          if (!shouldReconnect) {
+            return;
+          }
+
+          if (socket) {
+            try {
+              socket.close();
+            } catch (error) {
+              /* ignore */
+            }
+            socket = null;
+          }
+
+          clearReconnectTimer();
+          updateStatus('connecting');
+
+          const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+          const ws = new WebSocket(`${protocol}://${window.location.host}/ws/processed`);
+          socket = ws;
+
+          ws.addEventListener('open', () => {
+            if (socket === ws) {
+              updateStatus('connected');
+            }
+          });
+
+          ws.addEventListener('message', (event) => {
+            if (socket !== ws) {
+              return;
+            }
+            let data;
+            try {
+              data = JSON.parse(event.data);
+            } catch (error) {
+              data = { error: 'Не удалось разобрать сообщение', raw: event.data };
+            }
+            renderPayload(data);
+            setLastUpdated(new Date());
+          });
+
+          const handleDisconnect = () => {
+            if (socket !== ws) {
+              return;
+            }
+            socket = null;
+            updateStatus('disconnected');
+            scheduleReconnect();
+          };
+
+          ws.addEventListener('close', handleDisconnect);
+          ws.addEventListener('error', () => {
+            ws.close();
+          });
+        }
+
+        testButton.addEventListener('click', () => {
+          clicks += 1;
+          testCount.textContent = String(clicks);
+        });
+
+        window.addEventListener('beforeunload', () => {
+          shouldReconnect = false;
+          clearReconnectTimer();
+          if (socket) {
+            try {
+              socket.close();
+            } catch (error) {
+              /* ignore */
+            }
+            socket = null;
+          }
+        });
+
+        connect();
+      })();
     </script>
   </body>
 </html>
