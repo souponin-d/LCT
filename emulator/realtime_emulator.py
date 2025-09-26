@@ -10,12 +10,31 @@ import csv
 import json
 import time
 from collections import defaultdict
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator, Iterable, Iterator
 
 
-@dataclass(slots=True)
+# ``dataclass`` gained the ``slots`` parameter only in Python 3.10.
+# Older interpreters (e.g. Python 3.9 used on some developer machines) raise a
+# ``TypeError`` when the argument is provided.  The wrapper below keeps slot
+# generation enabled where possible, while remaining compatible with Python 3.9.
+def dataclass_with_optional_slots(_cls=None, /, *, slots: bool = True, **kwargs):
+    """Return a ``dataclass`` decorator that sets ``slots`` when supported."""
+
+    if sys.version_info >= (3, 10) and slots:
+        kwargs["slots"] = True
+
+    def wrap(cls):
+        return dataclass(cls, **kwargs)
+
+    if _cls is None:
+        return wrap
+    return wrap(_cls)
+
+
+@dataclass_with_optional_slots
 class RealTimeConfig:
     """Runtime configuration for the real-time emulator."""
 
