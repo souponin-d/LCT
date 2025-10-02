@@ -1,6 +1,4 @@
-"""
-Модуль для обработки данных КТГ из папки data и интеграции с анализатором
-"""
+"""Обработка данных КТГ и интеграция с анализатором."""
 
 import numpy as np
 import pandas as pd
@@ -14,9 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class CTGDataProcessor:
-    """
-    Процессор для массовой обработки данных КТГ
-    """
+    """Массовая обработка КТГ."""
     
     def __init__(self, data_path='./data', sampling_rate=4.0):
         """
@@ -48,9 +44,8 @@ class CTGDataProcessor:
         if not patient_path.exists():
             return data
         
-        # Загрузка BPM данных (сигнал ЧСС)
         bpm_path = patient_path / 'bpm'
-        if bmp_path.exists():
+        if bpm_path.exists():
             csv_files = list(bpm_path.glob('*.csv'))
             if max_files_per_type:
                 csv_files = csv_files[:max_files_per_type]

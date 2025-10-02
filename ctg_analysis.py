@@ -1,7 +1,4 @@
-"""
-Модуль для комплексного анализа сигналов КТГ (кардиотокографии)
-Выявление всех сущностей и классификация состояний плода
-"""
+"""Анализ КТГ: сущности, артефакты, классификация."""
 
 import numpy as np
 import pandas as pd
@@ -13,9 +10,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class CTGAnalyzer:
-    """
-    Комплексный анализатор сигналов КТГ для выявления сущностей и классификации состояний
-    """
+    """Анализатор сигналов КТГ."""
     
     def __init__(self, sampling_rate=4.0):
         """
@@ -25,8 +20,8 @@ class CTGAnalyzer:
             sampling_rate (float): Частота дискретизации в Гц (обычно 4 Гц для КТГ)
         """
         self.sampling_rate = sampling_rate
-        self.window_size_10min = int(10 * 60 * sampling_rate)  # 10 минут в отсчетах
-        self.window_size_1min = int(1 * 60 * sampling_rate)    # 1 минута в отсчетах
+        self.window_size_10min = int(10 * 60 * sampling_rate)
+        self.window_size_1min = int(1 * 60 * sampling_rate)
         
     def preprocess_signal(self, fhr_signal, uc_signal=None):
         """
